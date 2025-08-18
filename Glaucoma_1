@@ -1,1 +1,219 @@
-{"metadata":{"kernelspec":{"language":"python","display_name":"Python 3","name":"python3"},"language_info":{"name":"python","version":"3.11.13","mimetype":"text/x-python","codemirror_mode":{"name":"ipython","version":3},"pygments_lexer":"ipython3","nbconvert_exporter":"python","file_extension":".py"},"kaggle":{"accelerator":"gpu","dataSources":[{"sourceId":12782274,"sourceType":"datasetVersion","datasetId":8081235}],"dockerImageVersionId":31090,"isInternetEnabled":true,"language":"python","sourceType":"notebook","isGpuEnabled":true}},"nbformat_minor":4,"nbformat":4,"cells":[{"cell_type":"code","source":"import os\nimport torch\nimport torch.nn as nn\nfrom torch.utils.data import Dataset, DataLoader\nfrom torchvision import transforms, models\nfrom PIL import Image\nfrom sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, confusion_matrix\nimport glob\nimport matplotlib.pyplot as plt\nimport seaborn as sns\n\nDATA_DIR = \"/kaggle/input/glaucoma-dataset/ACRIMA\"\nPARTITIONED_DIR = os.path.join(DATA_DIR, \"PARTITIONED\")\nTRAIN_DIR = os.path.join(PARTITIONED_DIR, \"Training\")\nTEST_DIR = os.path.join(PARTITIONED_DIR, \"Testing\")\n\nDEVICE = torch.device(\"cuda\" if torch.cuda.is_available() else \"cpu\")\n\nBATCH_SIZE = 20\nLEARNING_RATE = 1e-4\nNUM_EPOCHS = 20\nIMAGE_SIZE = 224\n\nclass GlaucomaDataset(Dataset):\n    def __init__(self, root_dir, transform=None):\n        self.root_dir = root_dir\n        self.transform = transform\n        self.classes = [\"glaucoma\", \"normal\"]\n        self.image_paths = []\n        self.labels = []\n\n        image_extensions = (\".jpg\", \".jpeg\", \".png\", \".bmp\", \".gif\")\n\n        for class_name in self.classes:\n            class_path = os.path.join(self.root_dir, class_name)\n            for img_path in glob.glob(os.path.join(class_path, \"*\")):\n                if img_path.lower().endswith(image_extensions):\n                    self.image_paths.append(img_path)\n                    self.labels.append(self.classes.index(class_name))\n        \n        if not self.image_paths:\n            print(f\"Warning: No images found in {root_dir} with extensions {image_extensions}.\")\n\n    def __len__(self):\n        return len(self.image_paths)\n\n    def __getitem__(self, idx):\n        img_path = self.image_paths[idx]\n        image = Image.open(img_path).convert(\"RGB\")\n        label = self.labels[idx]\n\n        if self.transform:\n            image = self.transform(image)\n\n        return image, label\n\ndata_transforms = {\n    \"train\": transforms.Compose([\n        transforms.Resize(IMAGE_SIZE),\n        transforms.CenterCrop(IMAGE_SIZE),\n        transforms.ToTensor(),\n        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),\n    ]),\n    \"val\": transforms.Compose([\n        transforms.Resize(IMAGE_SIZE),\n        transforms.CenterCrop(IMAGE_SIZE),\n        transforms.ToTensor(),\n        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),\n    ])\n}\n\ndef get_model():\n    model = models.vit_b_16(pretrained=True)\n    \n    for param in model.parameters():\n        param.requires_grad = False\n\n    in_features = model.heads.head.in_features\n    model.heads.head = nn.Linear(in_features, 2)\n    \n    print(\"Using Vision Transformer (ViT) model: ViT-B/16\")\n    \n    return model\n\ndef train_model(model, train_loader, criterion, optimizer, num_epochs):\n    model.train()\n    print(\"Starting training...\")\n    for epoch in range(num_epochs):\n        running_loss = 0.0\n        for i, (images, labels) in enumerate(train_loader):\n            images = images.to(DEVICE)\n            labels = labels.to(DEVICE)\n\n            outputs = model(images)\n            loss = criterion(outputs, labels)\n\n            optimizer.zero_grad()\n            loss.backward()\n            optimizer.step()\n\n            running_loss += loss.item() * images.size(0)\n\n        epoch_loss = running_loss / len(train_loader.dataset)\n        print(f\"Epoch [{epoch+1}/{num_epochs}], Loss: {epoch_loss:.4f}\")\n    print(\"Training finished.\")\n\ndef evaluate_model(model, test_loader):\n    model.eval()\n    print(\"Evaluating model...\")\n    all_preds = []\n    all_labels = []\n\n    with torch.no_grad():\n        for images, labels in test_loader:\n            images = images.to(DEVICE)\n            labels = labels.to(DEVICE)\n            outputs = model(images)\n            _, predicted = torch.max(outputs.data, 1)\n            \n            all_preds.extend(predicted.cpu().numpy())\n            all_labels.extend(labels.cpu().numpy())\n\n    accuracy = accuracy_score(all_labels, all_preds)\n    precision = precision_score(all_labels, all_preds, average='binary')\n    recall = recall_score(all_labels, all_preds, average='binary')\n    f1 = f1_score(all_labels, all_preds, average='binary')\n\n    print(f\"Test Accuracy: {accuracy:.4f}\")\n    print(f\"Test Precision: {precision:.4f}\")\n    print(f\"Test Recall: {recall:.4f}\")\n    print(f\"Test F1-Score: {f1:.4f}\")\n    \n    return all_labels, all_preds\n\nif __name__ == \"__main__\":\n    train_dataset = GlaucomaDataset(root_dir=TRAIN_DIR, transform=data_transforms[\"train\"])\n    test_dataset = GlaucomaDataset(root_dir=TEST_DIR, transform=data_transforms[\"val\"])\n\n    train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True)\n    test_loader = DataLoader(test_dataset, batch_size=BATCH_SIZE, shuffle=False)\n\n    model = get_model().to(DEVICE)\n    criterion = nn.CrossEntropyLoss()\n    optimizer = torch.optim.Adam(model.parameters(), lr=LEARNING_RATE)\n\n    train_model(model, train_loader, criterion, optimizer, NUM_EPOCHS)\n\n    true_labels, predicted_labels = evaluate_model(model, test_loader)\n\n    print(\"\\n--- Model Analysis ---\")\n\n    cm = confusion_matrix(true_labels, predicted_labels)\n    plt.figure(figsize=(8, 6))\n    sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', xticklabels=['Glaucoma', 'Normal'], yticklabels=['Glaucoma', 'Normal'])\n    plt.title('Confusion Matrix')\n    plt.xlabel('Predicted Label')\n    plt.ylabel('True Label')\n    plt.show()\n\n    print(\"\\nSample of Actual vs. Predicted Labels:\")\n    for i in range(10):\n        actual_class = test_dataset.classes[true_labels[i]]\n        predicted_class = test_dataset.classes[predicted_labels[i]]\n        print(f\"Sample {i+1}: Actual: {actual_class}, Predicted: {predicted_class}\")\n\n    model_filename = \"glaucoma_vit_model.pth\"\n   \n    torch.save(model.state_dict(), model_filename)\n    print(f\"\\nModel saved to {model_filename}\")\n","metadata":{"_uuid":"8f2839f25d086af736a60e9eeb907d3b93b6e0e5","_cell_guid":"b1076dfc-b9ad-4769-8c92-a6c4dae69d19","trusted":true,"execution":{"iopub.status.busy":"2025-08-16T17:54:56.522149Z","iopub.execute_input":"2025-08-16T17:54:56.522761Z","iopub.status.idle":"2025-08-16T17:57:58.754082Z","shell.execute_reply.started":"2025-08-16T17:54:56.522735Z","shell.execute_reply":"2025-08-16T17:57:58.753427Z"}},"outputs":[{"name":"stderr","text":"/usr/local/lib/python3.11/dist-packages/torchvision/models/_utils.py:208: UserWarning: The parameter 'pretrained' is deprecated since 0.13 and may be removed in the future, please use 'weights' instead.\n  warnings.warn(\n/usr/local/lib/python3.11/dist-packages/torchvision/models/_utils.py:223: UserWarning: Arguments other than a weight enum or `None` for 'weights' are deprecated since 0.13 and may be removed in the future. The current behavior is equivalent to passing `weights=ViT_B_16_Weights.IMAGENET1K_V1`. You can also use `weights=ViT_B_16_Weights.DEFAULT` to get the most up-to-date weights.\n  warnings.warn(msg)\n","output_type":"stream"},{"name":"stdout","text":"Using Vision Transformer (ViT) model: ViT-B/16\nStarting training...\nEpoch [1/20], Loss: 0.6310\nEpoch [2/20], Loss: 0.5230\nEpoch [3/20], Loss: 0.4472\nEpoch [4/20], Loss: 0.3929\nEpoch [5/20], Loss: 0.3531\nEpoch [6/20], Loss: 0.3217\nEpoch [7/20], Loss: 0.2970\nEpoch [8/20], Loss: 0.2778\nEpoch [9/20], Loss: 0.2596\nEpoch [10/20], Loss: 0.2456\nEpoch [11/20], Loss: 0.2362\nEpoch [12/20], Loss: 0.2230\nEpoch [13/20], Loss: 0.2138\nEpoch [14/20], Loss: 0.2055\nEpoch [15/20], Loss: 0.1995\nEpoch [16/20], Loss: 0.1916\nEpoch [17/20], Loss: 0.1856\nEpoch [18/20], Loss: 0.1800\nEpoch [19/20], Loss: 0.1751\nEpoch [20/20], Loss: 0.1699\nTraining finished.\nEvaluating model...\nTest Accuracy: 0.9716\nTest Precision: 0.9677\nTest Recall: 0.9677\nTest F1-Score: 0.9677\n\n--- Model Analysis ---\n","output_type":"stream"},{"output_type":"display_data","data":{"text/plain":"<Figure size 800x600 with 2 Axes>","image/png":"iVBORw0KGgoAAAANSUhEUgAAAoAAAAIjCAYAAACTRapjAAAAOXRFWHRTb2Z0d2FyZQBNYXRwbG90bGliIHZlcnNpb24zLjcuMiwgaHR0cHM6Ly9tYXRwbG90bGliLm9yZy8pXeV/AAAACXBIWXMAAA9hAAAPYQGoP6dpAABLjUlEQVR4nO3de3zO9f/H8ec17NqYbazZ+GJOa44R+tZaJaKlFNHPITKH0gFhTt9Vc1hlUqGISkKiolAopzl9Y4QQlYXUKhuizXEb2+f3RzfXt8smu7Rrn8s+j/v39rndXO/P+/N5vz77fuf78nq/P+/LZhiGIQAAAFiGl9kBAAAAoHiRAAIAAFgMCSAAAIDFkAACAABYDAkgAACAxZAAAgAAWAwJIAAAgMWQAAIAAFgMCSAAAIDFkAAC+Fv79+/X3XffrYCAANlsNi1ZsqRI7//TTz/JZrNp9uzZRXrfa9mdd96pO++80+wwAJRgJIDANeDgwYN6/PHHVatWLfn4+Mjf319RUVF67bXXdO7cObeOHRMToz179ujFF1/U3Llz1bx5c7eOV5x69eolm80mf3//An+O+/fvl81mk81m0yuvvOLy/Q8fPqwxY8Zo165dRRAtABSd0mYHAODvLV++XP/3f/8nu92unj17qmHDhsrJydGXX36p4cOH69tvv9Xbb7/tlrHPnTun5ORkPfvssxowYIBbxggLC9O5c+dUpkwZt9z/SkqXLq2zZ89q6dKl6ty5s9O5efPmycfHR1lZWVd178OHD2vs2LGqUaOGmjRpUujrVq1adVXjAUBhkQACHuzQoUPq2rWrwsLCtHbtWlWuXNlxrn///jpw4ICWL1/utvGPHTsmSQoMDHTbGDabTT4+Pm67/5XY7XZFRUXpgw8+yJcAzp8/X/fdd58++eSTYonl7NmzKlu2rLy9vYtlPADWxRQw4MEmTJig06dPa+bMmU7J30V16tTRoEGDHJ8vXLig559/XrVr15bdbleNGjX0zDPPKDs72+m6GjVqqF27dvryyy/173//Wz4+PqpVq5bee+89R58xY8YoLCxMkjR8+HDZbDbVqFFD0p9Tpxf//FdjxoyRzWZzalu9erVuu+02BQYGys/PTxEREXrmmWcc5y+3BnDt2rW6/fbbVa5cOQUGBqp9+/b6/vvvCxzvwIED6tWrlwIDAxUQEKDevXvr7Nmzl//BXuLhhx/WF198oYyMDEfbtm3btH//fj388MP5+p84cULDhg1To0aN5OfnJ39/f7Vt21a7d+929Fm/fr1uuukmSVLv3r0dU8kXn/POO+9Uw4YNtWPHDt1xxx0qW7as4+dy6RrAmJgY+fj45Hv+6OhoVahQQYcPHy70swKARAIIeLSlS5eqVq1auvXWWwvV/9FHH9WoUaPUtGlTTZo0SS1atFBiYqK6du2ar++BAwf00EMPqU2bNnr11VdVoUIF9erVS99++60kqWPHjpo0aZIkqVu3bpo7d64mT57sUvzffvut2rVrp+zsbCUkJOjVV1/VAw88oE2bNv3tdWvWrFF0dLSOHj2qMWPGKDY2Vps3b1ZUVJR++umnfP07d+6sU6dOKTExUZ07d9bs2bM1duzYQsfZsWNH2Ww2LVq0yNE2f/581a1bV02bNs3X/8cff9SSJUvUrl07TZw4UcOHD9eePXvUokULRzJWr149JSQkSJL69eunuXPnau7cubrjjjsc9zl+/Ljatm2rJk2aaPLkyWrZsmWB8b322msKDg5WTEyMcnNzJUlvvfWWVq1apSlTpqhKlSqFflYAkCQZADxSZmamIclo3759ofrv2rXLkGQ8+uijTu3Dhg0zJBlr1651tIWFhRmSjI0bNzrajh49atjtdmPo0KGOtkOHDhmSjJdfftnpnjExMUZYWFi+GEaPHm389a+VSZMmGZKMY8eOXTbui2PMmjXL0dakSROjUqVKxvHjxx1tu3fvNry8vIyePXvmG69Pnz5O93zwwQeNoKCgy4751+coV66cYRiG8dBDDxl33XWXYRiGkZuba4SGhhpjx44t8GeQlZVl5Obm5nsOu91uJCQkONq2bduW79kuatGihSHJePPNNws816JFC6e2lStXGpKMF154wfjxxx8NPz8/o0OHDld8RgAoCBVAwEOdPHlSklS+fPlC9f/8888lSbGxsU7tQ4cOlaR8awXr16+v22+/3fE5ODhYERER+vHHH6865ktdXDv46aefKi8vr1DXpKWladeuXerVq5cqVqzoaL/hhhvUpk0bx3P+1RNPPOH0+fbbb9fx48cdP8PCePjhh7V+/Xqlp6dr7dq1Sk9PL3D6V/pz3aCX159/febm5ur48eOO6e2vv/660GPa7Xb17t27UH3vvvtuPf7440pISFDHjh3l4+Ojt956q9BjAcBfkQACHsrf31+SdOrUqUL1//nnn+Xl5aU6deo4tYeGhiowMFA///yzU3v16tXz3aNChQr6448/rjLi/Lp06aKoqCg9+uijCgkJUdeuXbVgwYK/TQYvxhkREZHvXL169fT777/rzJkzTu2XPkuFChUkyaVnuffee1W+fHl99NFHmjdvnm666aZ8P8uL8vLyNGnSJIWHh8tut+u6665TcHCwvvnmG2VmZhZ6zH/9618uvfDxyiuvqGLFitq1a5def/11VapUqdDXAsBfkQACHsrf319VqlTR3r17Xbru0pcwLqdUqVIFthuGcdVjXFyfdpGvr682btyoNWvW6JFHHtE333yjLl26qE2bNvn6/hP/5Fkustvt6tixo+bMmaPFixdftvonSePGjVNsbKzuuOMOvf/++1q5cqVWr16tBg0aFLrSKf3583HFzp07dfToUUnSnj17XLoWAP6KBBDwYO3atdPBgweVnJx8xb5hYWHKy8vT/v37ndqPHDmijIwMxxu9RaFChQpOb8xedGmVUZK8vLx01113aeLEifruu+/04osvau3atVq3bl2B974YZ0pKSr5z+/bt03XXXady5cr9swe4jIcfflg7d+7UqVOnCnxx5qKPP/5YLVu21MyZM9W1a1fdfffdat26db6fSWGT8cI4c+aMevfurfr166tfv36aMGGCtm3bVmT3B2AtJICABxsxYoTKlSunRx99VEeOHMl3/uDBg3rttdck/TmFKSnfm7oTJ06UJN13331FFlft2rWVmZmpb775xtGWlpamxYsXO/U7ceJEvmsvboh86dY0F1WuXFlNmjTRnDlznBKqvXv3atWqVY7ndIeWLVvq+eef19SpUxUaGnrZfqVKlcpXXVy4cKF+++03p7aLiWpBybKrRo4cqdTUVM2ZM0cTJ05UjRo1FBMTc9mfIwD8HTaCBjxY7dq1NX/+fHXp0kX16tVz+iaQzZs3a+HCherVq5ckqXHjxoqJidHbb7+tjIwMtWjRQl999ZXmzJmjDh06XHaLkavRtWtXjRw5Ug8++KCefvppnT17VtOnT9f111/v9BJEQkKCNm7cqPvuu09hYWE6evSopk2bpqpVq+q222677P1ffvlltW3bVpGRkerbt6/OnTunKVOmKCAgQGPGjCmy57iUl5eXnnvuuSv2a9eunRISEtS7d2/deuut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jRkz5m+vy8vL0+DBgxUVFaWGDRtKktLT0+Xt7a3AwECnviEhIUpPTy90TB6xBrBDhw5asmSJ2WEAAACLstncdxT0wmpc3JVfWO3fv7/27t2rDz/8sMif1/QKoCSFh4crISFBmzZtUrNmzVSuXDmn808//bRJkQEAACtw53YthZ3u/asBAwZo2bJl2rhxo6pWrepoDw0NVU5OjjIyMpyqgEeOHFGoC7theEQCOHPmTAUGBmrHjh3asWOH0zmbzUYCCAAALMEwDA0cOFCLFy/W+vXr870f0axZM5UpU0ZJSUnq1KmTJCklJUWpqamKjIws9DgekQAeOnTI7BAAAICVeciOzf3799f8+fP16aefqnz58o51fQEBAfL19VVAQID69u2r2NhYVaxYUf7+/ho4cKAiIyML/QKI5CEJ4F8ZhiFJfB8wAACwnOnTp0uS7rzzTqf2WbNmqVevXpKkSZMmycvLS506dVJ2draio6M1bdo0l8bxiJdAJOm9995To0aN5OvrK19fX91www2aO3eu2WEBAAALsLnxP64wDKPA42LyJ0k+Pj564403dOLECZ05c0aLFi1yaf2f5CEVwIkTJyo+Pl4DBgxQVFSUJOnLL7/UE088od9//11DhgwxOUIAAICSwyMSwClTpmj69Onq2bOno+2BBx5QgwYNNGbMGBJAAADgVlZbeeYRU8BpaWm69dZb87XfeuutSkvjq34AAACKkkckgHXq1NGCBQvytX/00UcKDw83ISIAAGAlNjcensgjpoDHjh2rLl26aOPGjY41gJs2bVJSUlKBiSEAAECR8tRMzU08ogLYqVMnbd26VUFBQVqyZImWLFmi6667Tl999ZUefPBBs8MDAAAoUTyiAij9ubP1vHnzzA4DAABYkKvbtVzrTE0Avby8rrjhs81m04ULF4opIgAAgJLP1ARw8eLFlz2XnJys119/XXl5ecUYEQAAsCKrbQNjagLYvn37fG0pKSn6z3/+o6VLl6p79+5KSEgwITIAAICSyyNeApGkw4cP67HHHlOjRo104cIF7dq1S3PmzFFYWJjZoQEAgBLOatvAmJ4AZmZmauTIkapTp46+/fZbJSUlaenSpWrYsKHZoQEAAJRIpk4BT5gwQS+99JJCQ0P1wQcfFDglDAAA4HaeWqpzE5thGIZZg3t5ecnX11etW7dWqVKlLttv0aJF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E8rJyXGcK0zsAGAGKoCABfn6+ur48eOOz0lJSfL399fq1aslSefPn1d0dLQiIyP13//+V6VLl9YLL7yge+65R9988428vb316quvavbs2Xr33XdVr149vfrqq1q8eLFatWp12XF79uyp5ORkvf7662rcuLEOHTqk33//XdWqVdMnn3yiTp06KSUlRf7+/vL19ZUkJSYm6v3339ebb76p8PBwbdy4UT169FBwcLBatGihX375RR07dlT//v3Vr18/bd++XUOHDv1HP5+8vDxVrVpVCxcuVFBQkDZv3qx+/fqpcuXK6ty5s9PPzcfHR+vXr9dPP/2k3r17KygoSC+++GKhYgcA0xgASrSYmBijffv2hmEYRl5enrF69WrDbrcbw4YNc5wPCQkxsrOzHdfMnTvXiIiIMPLy8hxt2dnZhq+vr7Fy5UrDMAyjcuXKxoQJExznz58/b1StWtUxlmEYRosWLYxBgwYZhmEYKSkphiRj9erVBca5bt06Q5Lxxx9/ONqysrKMsmXLGps3b3bq27dvX6Nbt26GYRhGXFycUb9+fafzI0eOzHevS4WFhRmTJk267PlL9e/f3+jUqZPjc0xMjFGxYkXjzJkzjrbp06cbfn5+Rm5ubqFiL+iZAaA4UAEELGDZsmXy8/PT+fPnlZeXp4cfflhjxoxxnG/UqJHTur/du3frwIEDKl++vNN9srKydPDgQWVmZiotLU0333yz41zp0qXVvHnzfNPAF+3atUulSpVyqfJ14MABnT17Vm3atHFqz8nJ0Y033ihJ+v77753ikKTIyMhCj3E5b7zxht59912lpqbq3LlzysnJUZMmTZz6NG7cWGXLlnUa9/Tp0/rll190+vTpK8YOAGYhAQQsoGXLlpo+fbq8vb1VpUoVlS7t/Ktfrlw5p8+nT59Ws2bNNG/evHz3Cg4OvqoYLk7puuL06dOSpOXLl+tf//qX0zm73X5VcRTGhx9+qGHDhunVV19VZGSkypcvr5dffllbt24t9D3Mih0ACoMEELCAcuXKqU6dOoXu37RpU3300UeqVKmS/P39C+xTuXJlbd26VXfccYck6cKFC9qxY4eaNm1aYP9GjRopLy9PGzZsUOvWrfOdv1iBzM3NdbTVr19fdrtdqampl60c1qtXz/FCy0Vbtmy58kP+jU2bNunWW2/VU0895Wg7ePBgvn67d+/WuXPnHMntli1b5Ofnp2rVqqlixYpXjB0AzMJbwADy6d69u6677jq1b99e//3vf3Xo0CGtX79eTz/9tH799VdJ0qBBgzR+/HgtWbJE+/bt01NPPfW3e/jVqFFDMTEx6tOnj5YsWeK454IFCyRJYWFhstlsWrZsmY4dO6bTp0+rfPnyGjZsmIYMGaI5c+bo4MGD+vrrrzVlyhTNmTNHkvTEE09o//79Gj58uFJSUjR//nzNnj27UM/522+/adeuXU7HH3/8ofDwcG3fvl0rV67UDz/8oPj4eG3bti3f9Tk5Oerbt6++++47ff755xo9erQGDBggLy+vQsUOAKYxexEiAPf660sgrpxPS0szevbsaVx33XWG3W43atWqZTz22GNGZmamYRh/vvQxaNAgw9/f3wgMDDRiY2ONnj17XvYlEMMwjHPnzhlDhgwxKleubHh7ext16tQx3n33Xcf5hIQEIzQ01LDZbEZMTIxhGH++uDJ58mQjIiLCKFOmjBEcHGxER0cbGzZscFy3dOlSo06dOobdbjduv/1249133y3USyCS8h1z5841srKyjF69ehkBAQFGYGCg8eSTTxr/+c9/jMaNG+f7uY0aNcoICgoy/Pz8jMcee8zIyspy9LlS7LwEAsAsNsO4zIptAAAAlEhMAQMAAFgMCSAAAIDFkAACAABYDAkgAACAxZAAAgAAWAwJIAAAgMWQAAIAAFgMCSAAAIDFkAACAABYDAkgAACAxZAAAgAAWMz/A0zEoESm2Zv6AAAAAElFTkSuQmCC\n"},"metadata":{}},{"name":"stdout","text":"\nSample of Actual vs. Predicted Labels:\nSample 1: Actual: glaucoma, Predicted: glaucoma\nSample 2: Actual: glaucoma, Predicted: glaucoma\nSample 3: Actual: glaucoma, Predicted: glaucoma\nSample 4: Actual: glaucoma, Predicted: glaucoma\nSample 5: Actual: glaucoma, Predicted: glaucoma\nSample 6: Actual: glaucoma, Predicted: glaucoma\nSample 7: Actual: glaucoma, Predicted: glaucoma\nSample 8: Actual: glaucoma, Predicted: glaucoma\nSample 9: Actual: glaucoma, Predicted: glaucoma\nSample 10: Actual: glaucoma, Predicted: glaucoma\n\nModel saved to glaucoma_vit_model.pth\n","output_type":"stream"}],"execution_count":9}]}
+import os
+import torch
+import torch.nn as nn
+from torch.utils.data import Dataset, DataLoader
+from torchvision import transforms, models
+from PIL import Image
+from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, confusion_matrix
+import glob
+import matplotlib.pyplot as plt
+import seaborn as sns
+
+DATA_DIR = "/kaggle/input/glaucoma-dataset/ACRIMA"
+PARTITIONED_DIR = os.path.join(DATA_DIR, "PARTITIONED")
+TRAIN_DIR = os.path.join(PARTITIONED_DIR, "Training")
+TEST_DIR = os.path.join(PARTITIONED_DIR, "Testing")
+
+DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+BATCH_SIZE = 20
+LEARNING_RATE = 1e-4
+NUM_EPOCHS = 20
+IMAGE_SIZE = 224
+
+class GlaucomaDataset(Dataset):
+    def __init__(self, root_dir, transform=None):
+        self.root_dir = root_dir
+        self.transform = transform
+        self.classes = ["glaucoma", "normal"]
+        self.image_paths = []
+        self.labels = []
+
+        image_extensions = (".jpg", ".jpeg", ".png", ".bmp", ".gif")
+
+        for class_name in self.classes:
+            class_path = os.path.join(self.root_dir, class_name)
+            for img_path in glob.glob(os.path.join(class_path, "*")):
+                if img_path.lower().endswith(image_extensions):
+                    self.image_paths.append(img_path)
+                    self.labels.append(self.classes.index(class_name))
+        
+        if not self.image_paths:
+            print(f"Warning: No images found in {root_dir} with extensions {image_extensions}.")
+
+    def __len__(self):
+        return len(self.image_paths)
+
+    def __getitem__(self, idx):
+        img_path = self.image_paths[idx]
+        image = Image.open(img_path).convert("RGB")
+        label = self.labels[idx]
+
+        if self.transform:
+            image = self.transform(image)
+
+        return image, label
+
+data_transforms = {
+    "train": transforms.Compose([
+        transforms.Resize(IMAGE_SIZE),
+        transforms.CenterCrop(IMAGE_SIZE),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+    ]),
+    "val": transforms.Compose([
+        transforms.Resize(IMAGE_SIZE),
+        transforms.CenterCrop(IMAGE_SIZE),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+    ])
+}
+
+def get_model():
+    model = models.vit_b_16(pretrained=True)
+    
+    for param in model.parameters():
+        param.requires_grad = False
+
+    in_features = model.heads.head.in_features
+    model.heads.head = nn.Linear(in_features, 2)
+    
+    print("Using Vision Transformer (ViT) model: ViT-B/16")
+    
+    return model
+
+def train_model(model, train_loader, criterion, optimizer, num_epochs):
+    model.train()
+    print("Starting training...")
+    for epoch in range(num_epochs):
+        running_loss = 0.0
+        for i, (images, labels) in enumerate(train_loader):
+            images = images.to(DEVICE)
+            labels = labels.to(DEVICE)
+
+            outputs = model(images)
+            loss = criterion(outputs, labels)
+
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+
+            running_loss += loss.item() * images.size(0)
+
+        epoch_loss = running_loss / len(train_loader.dataset)
+        print(f"Epoch [{epoch+1}/{num_epochs}], Loss: {epoch_loss:.4f}")
+    print("Training finished.")
+
+def evaluate_model(model, test_loader):
+    model.eval()
+    print("Evaluating model...")
+    all_preds = []
+    all_labels = []
+
+    with torch.no_grad():
+        for images, labels in test_loader:
+            images = images.to(DEVICE)
+            labels = labels.to(DEVICE)
+            outputs = model(images)
+            _, predicted = torch.max(outputs.data, 1)
+            
+            all_preds.extend(predicted.cpu().numpy())
+            all_labels.extend(labels.cpu().numpy())
+
+    accuracy = accuracy_score(all_labels, all_preds)
+    precision = precision_score(all_labels, all_preds, average='binary')
+    recall = recall_score(all_labels, all_preds, average='binary')
+    f1 = f1_score(all_labels, all_preds, average='binary')
+
+    print(f"Test Accuracy: {accuracy:.4f}")
+    print(f"Test Precision: {precision:.4f}")
+    print(f"Test Recall: {recall:.4f}")
+    print(f"Test F1-Score: {f1:.4f}")
+    
+    return all_labels, all_preds
+
+if __name__ == "__main__":
+    train_dataset = GlaucomaDataset(root_dir=TRAIN_DIR, transform=data_transforms["train"])
+    test_dataset = GlaucomaDataset(root_dir=TEST_DIR, transform=data_transforms["val"])
+
+    train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True)
+    test_loader = DataLoader(test_dataset, batch_size=BATCH_SIZE, shuffle=False)
+
+    model = get_model().to(DEVICE)
+    criterion = nn.CrossEntropyLoss()
+    optimizer = torch.optim.Adam(model.parameters(), lr=LEARNING_RATE)
+
+    train_model(model, train_loader, criterion, optimizer, NUM_EPOCHS)
+
+    true_labels, predicted_labels = evaluate_model(model, test_loader)
+
+    print("\n--- Model Analysis ---")
+
+    cm = confusion_matrix(true_labels, predicted_labels)
+    plt.figure(figsize=(8, 6))
+    sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', xticklabels=['Glaucoma', 'Normal'], yticklabels=['Glaucoma', 'Normal'])
+    plt.title('Confusion Matrix')
+    plt.xlabel('Predicted Label')
+    plt.ylabel('True Label')
+    plt.show()
+
+    print("\nSample of Actual vs. Predicted Labels:")
+    for i in range(10):
+        actual_class = test_dataset.classes[true_labels[i]]
+        predicted_class = test_dataset.classes[predicted_labels[i]]
+        print(f"Sample {i+1}: Actual: {actual_class}, Predicted: {predicted_class}")
+
+    model_filename = "glaucoma_vit_model.pth"
+   
+    torch.save(model.state_dict(), model_filename)
+    print(f"\nModel saved to {model_filename}")
+
+
+
+
+OUTPUT:
+100%|██████████| 330M/330M [00:01<00:00, 189MB/s]
+Using Vision Transformer (ViT) model: ViT-B/16
+Starting training...
+Epoch [1/20], Loss: 0.6565
+Epoch [2/20], Loss: 0.5488
+Epoch [3/20], Loss: 0.4689
+Epoch [4/20], Loss: 0.4129
+Epoch [5/20], Loss: 0.3713
+Epoch [6/20], Loss: 0.3388
+Epoch [7/20], Loss: 0.3137
+Epoch [8/20], Loss: 0.2927
+Epoch [9/20], Loss: 0.2760
+Epoch [10/20], Loss: 0.2603
+Epoch [11/20], Loss: 0.2476
+Epoch [12/20], Loss: 0.2365
+Epoch [13/20], Loss: 0.2274
+Epoch [14/20], Loss: 0.2179
+Epoch [15/20], Loss: 0.2103
+Epoch [16/20], Loss: 0.2033
+Epoch [17/20], Loss: 0.1968
+Epoch [18/20], Loss: 0.1912
+Epoch [19/20], Loss: 0.1857
+Epoch [20/20], Loss: 0.1806
+Training finished.
+Evaluating model...
+Test Accuracy: 0.9645
+Test Precision: 0.9524
+Test Recall: 0.9677
+Test F1-Score: 0.9600
+
+--- Model Analysis ---
+
+Sample of Actual vs. Predicted Labels:
+Sample 1: Actual: glaucoma, Predicted: glaucoma
+Sample 2: Actual: glaucoma, Predicted: glaucoma
+Sample 3: Actual: glaucoma, Predicted: glaucoma
+Sample 4: Actual: glaucoma, Predicted: glaucoma
+Sample 5: Actual: glaucoma, Predicted: glaucoma
+Sample 6: Actual: glaucoma, Predicted: glaucoma
+Sample 7: Actual: glaucoma, Predicted: glaucoma
+Sample 8: Actual: glaucoma, Predicted: normal
+Sample 9: Actual: glaucoma, Predicted: glaucoma
+Sample 10: Actual: glaucoma, Predicted: glaucoma
+
+Model saved to glaucoma_vit_model.pth
